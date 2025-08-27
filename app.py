@@ -1,4 +1,4 @@
-# app.py — Real Estate Listing Generator (PRO only, polished)
+# app.py — Real Estate Listing Generator (PRO only, with readable output cards)
 
 import os
 import time
@@ -33,7 +33,7 @@ ADMIN_OVERRIDE_CODE = get_secret("ADMIN_BYPASS", "")  # leave blank to disable
 USAGE_DAILY_LIMIT      = int(get_secret("USAGE_DAILY_LIMIT", "50"))      # generations/day
 USAGE_COOLDOWN_SECONDS = int(get_secret("USAGE_COOLDOWN_SECONDS", "5"))  # seconds between clicks
 
-# Model temperature (no slider; tuned for good copy)
+# Model temperature (fixed; no slider)
 TEMPERATURE = 0.7
 
 # ================== Page & Styles ==================
@@ -41,11 +41,37 @@ st.set_page_config(page_title="Real Estate Listing Generator", page_icon="🏠",
 
 st.markdown("""
 <style>
+/* Layout */
 .block-container { padding-top: 2rem; }
-div.stButton > button, div.stDownloadButton > button { border-radius: 10px; padding: 0.6rem 1rem; }
-.result-card { border:1px solid #eee; border-radius:12px; padding:16px; background:#fff; margin:14px 0; }
+
+/* Buttons */
+div.stButton > button, div.stDownloadButton > button { 
+  border-radius: 10px; padding: 0.6rem 1rem; 
+}
+
+/* Result card: strong contrast for both themes */
+.result-card {
+  border:1px solid #e8e8e8; 
+  border-radius:12px; 
+  padding:18px; 
+  background:#ffffff; 
+  box-shadow: 0 2px 14px rgba(0,0,0,0.05);
+  margin:14px 0;
+}
+.result-card, .result-card * { 
+  color:#111 !important; 
+  text-shadow:none !important; 
+  opacity:1 !important; 
+}
+.result-card code, .result-card pre {
+  background:transparent !important; 
+  color:#111 !important;
+}
+
+/* Misc */
 hr { border:none; border-top:1px solid #eee; margin: 18px 0; }
 .small { color:#666; font-size:0.9rem; }
+.variant-title { font-weight:600; margin-top:8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -206,12 +232,6 @@ def build_prompt() -> str:
     words_hint  = f"Aim for ~{length} words (±15%)."
     spelling_note = "Use UK spelling." if spelling == "UK" else "Use US spelling."
 
-    format_rules = {
-        "Paragraphs": "Produce 1–2 short paragraphs. No bullet lists.",
-        "Short summary + paragraph": "Start with a one-sentence summary, then one paragraph. No bullet lists.",
-        "Headline + paragraph": "Begin with a short, catchy headline on its own line, then one paragraph."
-    }
-
     bullets_clause = "Also include 3 concise selling-point bullets." if add_bullets else "Do not use bullet lists."
     title_clause   = "If appropriate, include a property headline/title." if add_title else "Do not include a separate headline."
     cta_clause     = "End with a short one-line call to action." if add_cta else "Do not include a call to action."
@@ -230,7 +250,7 @@ Formatting style: {format_choice}.
 {title_clause}
 {cta_clause}
 {bullets_clause}
-{words_hint}
+Aim for ~{length} words (±15%).
 {spelling_note}
 {must_include}
 {avoid_text}
@@ -324,8 +344,12 @@ if submitted:
 
             st.subheader("Results")
             for i, text in enumerate(outs, start=1):
-                st.markdown(f"**Variant {i}**")
+                st.markdown(f"<div class='variant-title'>Variant {i}</div>", unsafe_allow_html=True)
                 st.markdown(f"<div class='result-card'>{textwrap.dedent(text)}</div>", unsafe_allow_html=True)
+
+                with st.expander("Show raw text (copy)"):
+                    # read-only textarea for easy copy
+                    st.text_area(label=f"Variant {i} (raw)", value=text, height=220, key=f"raw_{i}")
 
             st.download_button(
                 "⬇️ Download all variants (.txt)",
@@ -349,4 +373,4 @@ with st.expander("🕘 History (this session)"):
             st.markdown("---")
 
 st.markdown("<hr/>", unsafe_allow_html=True)
-st.caption("Unlocked via Gumroad access key or admin override. Pro plan uses a single master API key. Contact: support@yourdomain.com")
+st.caption("Unlocked via Gumroad access key or admin override. Contact: yaseen.valji@gmail.com")
