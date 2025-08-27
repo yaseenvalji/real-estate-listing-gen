@@ -1,185 +1,158 @@
-# app.py — Real Estate Listing Generator (Pro + BYOK, polished & complete)
+# app.py — Real Estate Listing Generator (PRO only)
+# - License gate via Gumroad license key
+# - Admin override code (no purchase needed)
+# - Uses master OPENAI_API_KEY from secrets (no BYOK)
+# - Daily usage cap, cooldown, midnight reset
 
 import os
-import io
-import json
 import time
 import textwrap
 import requests
+import datetime as dt
 import streamlit as st
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
+from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# ======================= Config & Secrets =======================
+# ================== Config & Secrets ==================
 load_dotenv()
 
 def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
-    # Prefer Streamlit Cloud secrets, fallback to environment
     try:
         return st.secrets.get(name, os.getenv(name, default))
     except Exception:
         return os.getenv(name, default)
 
-# Pro plan (your key)
-MASTER_OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
+# Required for generation
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")                   # your master API key
+DEFAULT_MODEL  = get_secret("OPENAI_DEFAULT_MODEL", "gpt-4o-mini")
 
-# Dual / Single Gumroad product(s)
-GUMROAD_PRODUCT_PERMALINK_PRO = get_secret("GUMROAD_PRODUCT_PERMALINK_PRO")
-GUMROAD_PRODUCT_PERMALINK_BYOK = get_secret("GUMROAD_PRODUCT_PERMALINK_BYOK")
-GUMROAD_PRODUCT_PERMALINK = get_secret("GUMROAD_PRODUCT_PERMALINK")  # single-product fallback
+# License gate (set the Gumroad product permalink slug, e.g., "real-estate-listing-gen-pro")
+GUMROAD_PRODUCT_PERMALINK = get_secret("GUMROAD_PRODUCT_PERMALINK", "")
 
-# Model & defaults
-DEFAULT_MODEL = get_secret("OPENAI_DEFAULT_MODEL", "gpt-4o-mini")
+# Admin override (your private code to unlock without purchase)
+ADMIN_OVERRIDE_CODE = get_secret("ADMIN_BYPASS", "")  # leave blank to disable
 
-# ======================= Page Setup & Style =======================
-st.set_page_config(
-    page_title="Real Estate Listing Generator",
-    page_icon="🏠",
-    layout="centered",
-    initial_sidebar_state="expanded",
-)
+# Usage caps
+USAGE_DAILY_LIMIT      = int(get_secret("USAGE_DAILY_LIMIT", "50"))     # capped generations per day
+USAGE_COOLDOWN_SECONDS = int(get_secret("USAGE_COOLDOWN_SECONDS", "5")) # seconds between clicks
+
+# ================== Page & Styles ==================
+st.set_page_config(page_title="Real Estate Listing Generator", page_icon="🏠", layout="centered")
 
 st.markdown("""
 <style>
 .block-container { padding-top: 2rem; }
 h1 span.brand { color: #E63946; }
-div[data-testid="stMetric"] { background: #fafafa; border-radius: 12px; padding: 10px; border: 1px solid #eee; }
-div.stButton > button { border-radius: 10px; padding: 0.6rem 1rem; }
-div.stDownloadButton > button { border-radius: 10px; }
-hr { border: none; border-top: 1px solid #eee; margin: 18px 0; }
-.small { color:#666; font-size: 0.9rem; }
-.kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#f1f1f1; padding:2px 6px; border-radius:6px; }
-.result-card { border:1px solid #eee; border-radius:12px; padding:16px; background:#fff; margin-bottom:14px; }
+div.stButton > button, div.stDownloadButton > button { border-radius: 10px; padding: 0.6rem 1rem; }
+.result-card { border:1px solid #eee; border-radius:12px; padding:16px; background:#fff; margin:14px 0; }
+hr { border:none; border-top:1px solid #eee; margin: 18px 0; }
+.small { color:#666; font-size:0.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🏠 <span class='brand'>Real Estate Listing Generator</span>", help="Generate polished property listings in seconds.")
-st.caption("Enter a few details, choose tone & format, and get copy you can use immediately.")
+st.caption("Unlock with your purchase key. Admins can use a private override code.")
 
-# ======================= Session State =======================
+# ================== Guards ==================
+if not OPENAI_API_KEY:
+    st.error("Server misconfigured: missing OPENAI_API_KEY (set it in Streamlit Secrets).")
+    st.stop()
+
+# ================== Session State ==================
 if "licensed" not in st.session_state:
     st.session_state.licensed = False
-if "plan" not in st.session_state:
-    st.session_state.plan = None       # "pro" or "byok"
 if "history" not in st.session_state:
-    st.session_state.history = []      # [{inputs, outputs, ts}]
+    st.session_state.history = []
 if "last_variants" not in st.session_state:
-    st.session_state.last_variants = []  # list[str]
+    st.session_state.last_variants = []
+if "usage" not in st.session_state:
+    st.session_state.usage = {
+        "date": dt.date.today().isoformat(),
+        "count": 0,
+        "last_ts": 0.0,
+        "bypass": False,  # set True if admin override is accepted
+    }
 
-# ======================= Gumroad License (Optional) =======================
-def verify_gumroad_license(license_key: str, product_permalink: str) -> Dict[str, Any]:
-    """
-    Minimal verification call to Gumroad. Returns JSON or {}.
-    """
+# ================== License Helpers ==================
+def verify_gumroad_license(license_key: str, product_permalink: str) -> bool:
+    """Call Gumroad license verify API. Return True if valid."""
     try:
         url = "https://api.gumroad.com/v2/licenses/verify"
         data = {
             "product_permalink": product_permalink,
             "license_key": license_key,
-            "increment_uses_count": False
+            "increment_uses_count": False,
         }
         r = requests.post(url, data=data, timeout=10)
-        return r.json() if r.ok else {}
+        j = r.json() if r.ok else {}
+        return bool(j.get("success"))
     except Exception:
-        return {}
+        return False
 
-def license_gate():
-    """Show a license gate if any Gumroad permalink envs are set."""
-    dual = bool(GUMROAD_PRODUCT_PERMALINK_PRO or GUMROAD_PRODUCT_PERMALINK_BYOK)
-    single = bool(GUMROAD_PRODUCT_PERMALINK) and not dual
-
-    if not (dual or single):
-        # No gating configured -> allow access
-        st.session_state.licensed = True
-        st.session_state.plan = "pro" if MASTER_OPENAI_API_KEY else "byok"
-        return
-
-    st.info("🔒 Enter your license key to unlock.", icon="🔑")
+def show_license_gate():
+    """Show access gate. Unlock with Gumroad license key or admin override."""
+    st.info("🔒 Enter your **Access Key** to unlock.", icon="🔑")
     with st.form("license_form"):
-        license_key = st.text_input("License key", placeholder="XXXX-XXXX-XXXX-XXXX")
+        access_key = st.text_input("Access Key", placeholder="Your Gumroad license key", type="password")
         submit = st.form_submit_button("Unlock")
 
     if submit:
-        # Build list of permalinks to check
-        permalinks = []
-        if dual:
-            if GUMROAD_PRODUCT_PERMALINK_PRO:
-                permalinks.append(("pro", GUMROAD_PRODUCT_PERMALINK_PRO))
-            if GUMROAD_PRODUCT_PERMALINK_BYOK:
-                permalinks.append(("byok", GUMROAD_PRODUCT_PERMALINK_BYOK))
-        else:
-            # single product
-            permalinks.append(("pro" if MASTER_OPENAI_API_KEY else "byok", GUMROAD_PRODUCT_PERMALINK))
-
-        ok_plan = None
-        for plan, p in permalinks:
-            j = verify_gumroad_license(license_key, p)
-            if j.get("success"):
-                ok_plan = plan
-                break
-
-        if ok_plan:
+        # Admin override: if matches your secret code, unlock without Gumroad
+        if ADMIN_OVERRIDE_CODE and access_key.strip() == ADMIN_OVERRIDE_CODE.strip():
+            st.session_state.usage["bypass"] = True
             st.session_state.licensed = True
-            st.session_state.plan = ok_plan
-            st.success(f"License verified ✅ ({ok_plan.upper()} plan)")
+            st.success("Admin override accepted ✅")
+            st.rerun()
+
+        # Otherwise, validate against Gumroad
+        if not GUMROAD_PRODUCT_PERMALINK:
+            st.error("Server misconfigured: missing GUMROAD_PRODUCT_PERMALINK. Contact support.")
+            st.stop()
+
+        ok = verify_gumroad_license(access_key.strip(), GUMROAD_PRODUCT_PERMALINK)
+        if ok:
+            st.session_state.licensed = True
+            st.success("License verified ✅")
             st.rerun()
         else:
-            st.error("Invalid license. Please check your key or contact support.")
+            st.error("Invalid access key. Please check your key or contact support.")
 
+# Show gate if not yet licensed
 if not st.session_state.licensed:
-    license_gate()
+    show_license_gate()
     if not st.session_state.licensed:
         st.stop()
 
-# ======================= API Client =======================
-def get_openai_client() -> Optional[OpenAI]:
-    """Return OpenAI client for PRO (master key) or BYOK (user key)."""
-    if st.session_state.plan == "pro":
-        if not MASTER_OPENAI_API_KEY:
-            st.error("Server misconfigured: missing OPENAI_API_KEY for PRO plan.")
-            return None
-        return OpenAI(api_key=MASTER_OPENAI_API_KEY)
+# ================== OpenAI Client ==================
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # BYOK
-    with st.sidebar:
-        st.subheader("🔑 API Key (BYOK)")
-        user_key = st.text_input(
-            "Your OpenAI API key",
-            type="password",
-            placeholder="sk-...",
-            help="Your requests bill to your own OpenAI account."
-        )
-        st.caption("We do not store your key. It remains in your session.")
-    if not user_key:
-        st.warning("Enter your OpenAI API key in the sidebar to continue.", icon="⚠️")
-        return None
-    return OpenAI(api_key=user_key)
-
-client = get_openai_client()
-if client is None:
-    st.stop()
-
-# ======================= Sidebar Controls =======================
+# ================== Sidebar Controls ==================
 with st.sidebar:
     st.header("⚙️ Settings")
-    model = st.selectbox(
-        "Model",
-        options=[DEFAULT_MODEL, "gpt-4o", "gpt-4o-mini"],
-        index=0,
-        help="4o-mini is cost-effective and fast. 4o is higher quality at higher cost."
-    )
+    model = st.selectbox("Model", options=[DEFAULT_MODEL, "gpt-4o", "gpt-4o-mini"], index=0)
     temperature = st.slider("Creativity (temperature)", 0.0, 1.2, 0.7, 0.1)
     variants = st.select_slider("Number of variants", options=[1, 2, 3], value=2)
-    st.divider()
-    st.caption("Pro tip: keep variants at 2–3 to pick the best version quickly.")
 
-# ======================= Form =======================
+    # Usage counters (reset at local midnight)
+    st.markdown("---")
+    today = dt.date.today().isoformat()
+    if st.session_state.usage["date"] != today:
+        st.session_state.usage["date"] = today
+        st.session_state.usage["count"] = 0
+        st.session_state.usage["last_ts"] = 0.0
+
+    remaining = max(0, USAGE_DAILY_LIMIT - st.session_state.usage["count"])
+    st.metric(label="Generations left (today)", value=remaining)
+
+    if st.session_state.usage.get("bypass"):
+        st.success("Admin bypass active")
+
+# ================== Form ==================
 with st.form("listing_form"):
     st.subheader("Property Details")
-
     address = st.text_input("Address / Area", placeholder="e.g., 20 Maunder Close, RM16 6BB")
+
     col1, col2, col3 = st.columns([1,1,1])
     with col1:
         beds = st.number_input("Bedrooms", min_value=0, step=1, value=2)
@@ -215,35 +188,31 @@ with st.form("listing_form"):
 
     st.subheader("Extras")
     add_title = st.checkbox("Generate a property headline/title", value=True)
-    add_cta = st.checkbox("Generate a short call-to-action line", value=True)
+    add_cta   = st.checkbox("Generate a short call-to-action line", value=True)
     add_bullets = st.checkbox("Add 3 selling-point bullets (optional)", value=False)
 
     submitted = st.form_submit_button("✨ Generate Listing")
 
-# ======================= Prompt Builder =======================
+# ================== Prompt Builder ==================
 def build_prompt() -> str:
-    kw_in = [k.strip() for k in include_keywords.split(",") if k.strip()]
+    kw = [k.strip() for k in include_keywords.split(",") if k.strip()]
     avoid = [k.strip() for k in avoid_phrases.split(",") if k.strip()]
+    label_beds = "studio" if beds == 0 else f"{beds}-bedroom"
+    label_baths = f"{baths} bathroom" if baths == 1 else f"{baths} bathrooms"
     words_hint = f"Aim for ~{length} words (±15%)."
+    spelling_note = "Use UK spelling." if spelling == "UK" else "Use US spelling."
 
     format_rules = {
         "Paragraphs": "Produce 1–2 short paragraphs. No bullet lists.",
         "Short summary + paragraph": "Start with a one-sentence summary, then one paragraph. No bullet lists.",
-        "Headline + paragraph": "Begin with a short, catchy headline on its own line, then one paragraph.",
+        "Headline + paragraph": "Begin with a short, catchy headline on its own line, then one paragraph."
     }
 
-    label_beds = "studio" if beds == 0 else f"{beds}-bedroom"
-    label_baths = f"{baths} bathroom" if baths == 1 else f"{baths} bathrooms"
-
-    spelling_note = "Use UK spelling." if spelling == "UK" else "Use US spelling."
-
     bullets_clause = "Also include 3 concise selling-point bullets." if add_bullets else "Do not use bullet lists."
-
-    title_clause = "If appropriate, include a property headline/title." if add_title else "Do not include a separate headline."
-    cta_clause = "End with a short one-line call to action." if add_cta else "Do not include a call to action."
-
-    must_include = ("Ensure you naturally include these keywords: " + ", ".join(kw_in) + ".") if kw_in else ""
-    avoid_text = ("Avoid using these words/phrases: " + ", ".join(avoid) + ".") if avoid else ""
+    title_clause   = "If appropriate, include a property headline/title." if add_title else "Do not include a separate headline."
+    cta_clause     = "End with a short one-line call to action." if add_cta else "Do not include a call to action."
+    must_include   = ("Ensure you naturally include these keywords: " + ", ".join(kw) + ".") if kw else ""
+    avoid_text     = ("Avoid using these words/phrases: " + ", ".join(avoid) + ".") if avoid else ""
 
     return f"""
 You are an expert real-estate listing copywriter.
@@ -271,11 +240,10 @@ Rules:
 Return only the listing text (no extra commentary).
 """.strip()
 
-# ======================= Generation =======================
+# ================== Generation ==================
 def generate_variants(n: int) -> List[str]:
-    """Generate n variants using the chat.completions API."""
     prompt = build_prompt()
-    results = []
+    outs = []
     for i in range(n):
         try:
             resp = client.chat.completions.create(
@@ -289,49 +257,62 @@ def generate_variants(n: int) -> List[str]:
             )
             text = (resp.choices[0].message.content or "").strip()
             if text:
-                results.append(text)
+                outs.append(text)
         except Exception as e:
             st.error(f"OpenAI error (variant {i+1}): {e}")
             break
-    return results
+    return outs
 
 def to_txt_bundle(texts: List[str]) -> bytes:
-    """Create a plain-text bundle for download."""
-    chunks = []
+    body = []
     for idx, t in enumerate(texts, start=1):
-        chunks.append(f"=== VARIANT {idx} ===\n{t}\n")
-    return "\n".join(chunks).encode("utf-8")
+        body.append(f"=== VARIANT {idx} ===\n{t}\n")
+    return "\n".join(body).encode("utf-8")
 
-# ======================= Render & Actions =======================
+# ================== Submit Logic (with caps) ==================
 if submitted:
     if not address.strip():
         st.error("Please enter an address/location.")
     else:
+        now = time.time()
+        usage = st.session_state.usage
+        is_admin = bool(usage.get("bypass"))
+
+        # Daily cap / cooldown unless admin override in effect
+        if not is_admin:
+            # Daily limit
+            if usage["count"] >= USAGE_DAILY_LIMIT:
+                reset_at = dt.datetime.combine(dt.date.today() + dt.timedelta(days=1), dt.time.min)
+                mins_left = int((reset_at - dt.datetime.now()).total_seconds() // 60)
+                st.error(f"Daily limit reached. Resets in ~{mins_left} minutes.")
+                st.stop()
+            # Cooldown
+            since = now - float(usage["last_ts"])
+            if since < USAGE_COOLDOWN_SECONDS:
+                wait = int(USAGE_COOLDOWN_SECONDS - since + 1)
+                st.warning(f"Please wait {wait}s before generating again.")
+                st.stop()
+
         with st.spinner("Generating…"):
-            outs = generate_variants(int(variants))
+            outs = generate_variants(2)  # variants slider exists, but enforce 2 here if you prefer
+            # If you want to respect the sidebar setting, replace 2 with int(variants)
 
         if not outs:
             st.warning("No text returned. Try adjusting inputs and generate again.")
         else:
+            if not is_admin:
+                usage["count"] += 1
+                usage["last_ts"] = now
+
             st.session_state.last_variants = outs
-            # Record history (lightweight)
             st.session_state.history.append({
                 "inputs": {
-                    "address": address,
-                    "beds": beds,
-                    "baths": baths,
-                    "property_type": property_type,
-                    "features": features,
-                    "tone": tone,
-                    "audience": audience,
-                    "length": length,
-                    "spelling": spelling,
-                    "include_keywords": include_keywords,
-                    "avoid_phrases": avoid_phrases,
-                    "format_choice": format_choice,
-                    "title": add_title,
-                    "cta": add_cta,
-                    "bullets": add_bullets,
+                    "address": address, "beds": beds, "baths": baths,
+                    "property_type": property_type, "features": features,
+                    "tone": tone, "audience": audience, "length": length,
+                    "spelling": spelling, "include_keywords": include_keywords,
+                    "avoid_phrases": avoid_phrases, "format_choice": format_choice,
+                    "title": add_title, "cta": add_cta, "bullets": add_bullets,
                 },
                 "outputs": outs,
                 "ts": int(time.time())
@@ -339,26 +320,17 @@ if submitted:
 
             st.subheader("Results")
             for i, text in enumerate(outs, start=1):
-                with st.container():
-                    st.markdown(f"**Variant {i}**")
-                    st.markdown(f"<div class='result-card'>{textwrap.dedent(text)}</div>", unsafe_allow_html=True)
-                    c1, c2 = st.columns([1,1])
-                    with c1:
-                        st.code(text, language="markdown")
-                    with c2:
-                        st.button(f"Copy Variant {i}", type="secondary", key=f"copy_btn_{i}",
-                                  help="Select the code block on the left and press ⌘C / Ctrl+C to copy.")
+                st.markdown(f"**Variant {i}**")
+                st.markdown(f"<div class='result-card'>{textwrap.dedent(text)}</div>", unsafe_allow_html=True)
 
-            # Download all
-            data = to_txt_bundle(outs)
             st.download_button(
                 "⬇️ Download all variants (.txt)",
-                data=data,
+                data=to_txt_bundle(outs),
                 file_name="listing_variants.txt",
                 mime="text/plain"
             )
 
-# ======================= History Panel =======================
+# ================== History ==================
 with st.expander("🕘 History (this session)"):
     if not st.session_state.history:
         st.caption("No history yet.")
@@ -372,6 +344,5 @@ with st.expander("🕘 History (this session)"):
                 st.markdown(f"*Variant {j}:* {out[:160]}{'…' if len(out)>160 else ''}")
             st.markdown("---")
 
-# ======================= Footer Tips =======================
 st.markdown("<hr/>", unsafe_allow_html=True)
-st.caption("Tip: For UK agents, keep spelling on UK and emphasize proximity to stations, schools, and high streets. For investors, highlight yields, tenant appeal, and low maintenance.")
+st.caption("Unlocked via Gumroad access key or admin override.")
