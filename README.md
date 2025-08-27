@@ -1,9 +1,3 @@
-<p align="center">
-  <img src="logo.png" alt="Relura Logo" width="180"/>
-</p>
-
----
-
 ## 👤 About Relura  
 
 Relura builds **practical AI tools** that save professionals time and help them win more business.  
