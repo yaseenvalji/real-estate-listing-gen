@@ -1,8 +1,4 @@
-# app.py — Real Estate Listing Generator (PRO only)
-# - License gate via Gumroad license key
-# - Admin override code (no purchase needed)
-# - Uses master OPENAI_API_KEY from secrets (no BYOK)
-# - Daily usage cap, cooldown, midnight reset
+# app.py — Real Estate Listing Generator (PRO only, polished)
 
 import os
 import time
@@ -23,19 +19,22 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     except Exception:
         return os.getenv(name, default)
 
-# Required for generation
-OPENAI_API_KEY = get_secret("OPENAI_API_KEY")                   # your master API key
+# Required (your master API key; users never see this)
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
 DEFAULT_MODEL  = get_secret("OPENAI_DEFAULT_MODEL", "gpt-4o-mini")
 
-# License gate (set the Gumroad product permalink slug, e.g., "real-estate-listing-gen-pro")
+# License gate (Gumroad permalink slug, e.g., "real-estate-listing-gen-pro")
 GUMROAD_PRODUCT_PERMALINK = get_secret("GUMROAD_PRODUCT_PERMALINK", "")
 
-# Admin override (your private code to unlock without purchase)
+# Admin override (enter this in the gate to unlock without purchase)
 ADMIN_OVERRIDE_CODE = get_secret("ADMIN_BYPASS", "")  # leave blank to disable
 
-# Usage caps
-USAGE_DAILY_LIMIT      = int(get_secret("USAGE_DAILY_LIMIT", "50"))     # capped generations per day
-USAGE_COOLDOWN_SECONDS = int(get_secret("USAGE_COOLDOWN_SECONDS", "5")) # seconds between clicks
+# Usage controls
+USAGE_DAILY_LIMIT      = int(get_secret("USAGE_DAILY_LIMIT", "50"))      # generations/day
+USAGE_COOLDOWN_SECONDS = int(get_secret("USAGE_COOLDOWN_SECONDS", "5"))  # seconds between clicks
+
+# Model temperature (no slider; tuned for good copy)
+TEMPERATURE = 0.7
 
 # ================== Page & Styles ==================
 st.set_page_config(page_title="Real Estate Listing Generator", page_icon="🏠", layout="centered")
@@ -43,7 +42,6 @@ st.set_page_config(page_title="Real Estate Listing Generator", page_icon="🏠",
 st.markdown("""
 <style>
 .block-container { padding-top: 2rem; }
-h1 span.brand { color: #E63946; }
 div.stButton > button, div.stDownloadButton > button { border-radius: 10px; padding: 0.6rem 1rem; }
 .result-card { border:1px solid #eee; border-radius:12px; padding:16px; background:#fff; margin:14px 0; }
 hr { border:none; border-top:1px solid #eee; margin: 18px 0; }
@@ -51,8 +49,10 @@ hr { border:none; border-top:1px solid #eee; margin: 18px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏠 <span class='brand'>Real Estate Listing Generator</span>", help="Generate polished property listings in seconds.")
-st.caption("Unlock with your purchase key. Admins can use a private override code.")
+st.title("🏠 Real Estate Listing Generator")
+# Show this caption ONLY before the user unlocks
+if not st.session_state.get("licensed", False):
+    st.caption("Unlock with your purchase key. Admins can use a private override code.")
 
 # ================== Guards ==================
 if not OPENAI_API_KEY:
@@ -71,12 +71,12 @@ if "usage" not in st.session_state:
         "date": dt.date.today().isoformat(),
         "count": 0,
         "last_ts": 0.0,
-        "bypass": False,  # set True if admin override is accepted
+        "bypass": False,  # True when admin override is accepted
     }
 
 # ================== License Helpers ==================
 def verify_gumroad_license(license_key: str, product_permalink: str) -> bool:
-    """Call Gumroad license verify API. Return True if valid."""
+    """Return True if the Gumroad license is valid for the product."""
     try:
         url = "https://api.gumroad.com/v2/licenses/verify"
         data = {
@@ -91,27 +91,27 @@ def verify_gumroad_license(license_key: str, product_permalink: str) -> bool:
         return False
 
 def show_license_gate():
-    """Show access gate. Unlock with Gumroad license key or admin override."""
-    st.info("🔒 Enter your **Access Key** to unlock.", icon="🔑")
+    """Gate: unlock with Gumroad license key or admin override."""
+    st.info("🔒 Enter your Access Key to unlock.", icon="🔑")
     with st.form("license_form"):
         access_key = st.text_input("Access Key", placeholder="Your Gumroad license key", type="password")
-        submit = st.form_submit_button("Unlock")
+        ok = st.form_submit_button("Unlock")
 
-    if submit:
-        # Admin override: if matches your secret code, unlock without Gumroad
+    if ok:
+        # Admin override first
         if ADMIN_OVERRIDE_CODE and access_key.strip() == ADMIN_OVERRIDE_CODE.strip():
             st.session_state.usage["bypass"] = True
             st.session_state.licensed = True
             st.success("Admin override accepted ✅")
             st.rerun()
 
-        # Otherwise, validate against Gumroad
+        # Otherwise validate with Gumroad
         if not GUMROAD_PRODUCT_PERMALINK:
             st.error("Server misconfigured: missing GUMROAD_PRODUCT_PERMALINK. Contact support.")
             st.stop()
 
-        ok = verify_gumroad_license(access_key.strip(), GUMROAD_PRODUCT_PERMALINK)
-        if ok:
+        valid = verify_gumroad_license(access_key.strip(), GUMROAD_PRODUCT_PERMALINK)
+        if valid:
             st.session_state.licensed = True
             st.success("License verified ✅")
             st.rerun()
@@ -130,8 +130,12 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ================== Sidebar Controls ==================
 with st.sidebar:
     st.header("⚙️ Settings")
-    model = st.selectbox("Model", options=[DEFAULT_MODEL, "gpt-4o", "gpt-4o-mini"], index=0)
-    temperature = st.slider("Creativity (temperature)", 0.0, 1.2, 0.7, 0.1)
+
+    # De-duplicated model list (DEFAULT first)
+    models = list(dict.fromkeys([DEFAULT_MODEL, "gpt-4o-mini", "gpt-4o"]))
+    model = st.selectbox("Model", options=models, index=0)
+
+    # No creativity slider; fixed temperature
     variants = st.select_slider("Number of variants", options=[1, 2, 3], value=2)
 
     # Usage counters (reset at local midnight)
@@ -179,7 +183,7 @@ with st.form("listing_form"):
     length = st.slider("Length (words)", 80, 240, 150, 10)
     spelling = st.selectbox("Spelling", ["UK", "US"])
     include_keywords = st.text_input("Must-include keywords (comma-separated)", placeholder="near schools, chain-free")
-    avoid_phrases = st.text_input("Avoid phrases (comma-separated)", placeholder="The property, apologies")
+    avoid_phrases   = st.text_input("Avoid phrases (comma-separated)", placeholder="The property, apologies")
     format_choice = st.selectbox("Format", [
         "Paragraphs",
         "Short summary + paragraph",
@@ -187,8 +191,8 @@ with st.form("listing_form"):
     ])
 
     st.subheader("Extras")
-    add_title = st.checkbox("Generate a property headline/title", value=True)
-    add_cta   = st.checkbox("Generate a short call-to-action line", value=True)
+    add_title   = st.checkbox("Generate a property headline/title", value=True)
+    add_cta     = st.checkbox("Generate a short call-to-action line", value=True)
     add_bullets = st.checkbox("Add 3 selling-point bullets (optional)", value=False)
 
     submitted = st.form_submit_button("✨ Generate Listing")
@@ -197,9 +201,9 @@ with st.form("listing_form"):
 def build_prompt() -> str:
     kw = [k.strip() for k in include_keywords.split(",") if k.strip()]
     avoid = [k.strip() for k in avoid_phrases.split(",") if k.strip()]
-    label_beds = "studio" if beds == 0 else f"{beds}-bedroom"
+    label_beds  = "studio" if beds == 0 else f"{beds}-bedroom"
     label_baths = f"{baths} bathroom" if baths == 1 else f"{baths} bathrooms"
-    words_hint = f"Aim for ~{length} words (±15%)."
+    words_hint  = f"Aim for ~{length} words (±15%)."
     spelling_note = "Use UK spelling." if spelling == "UK" else "Use US spelling."
 
     format_rules = {
@@ -252,7 +256,7 @@ def generate_variants(n: int) -> List[str]:
                     {"role": "system", "content": "You write excellent property listings."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=temperature,
+                temperature=TEMPERATURE,
                 max_tokens=700,
             )
             text = (resp.choices[0].message.content or "").strip()
@@ -269,7 +273,7 @@ def to_txt_bundle(texts: List[str]) -> bytes:
         body.append(f"=== VARIANT {idx} ===\n{t}\n")
     return "\n".join(body).encode("utf-8")
 
-# ================== Submit Logic (with caps) ==================
+# ================== Submit Logic (caps + cooldown) ==================
 if submitted:
     if not address.strip():
         st.error("Please enter an address/location.")
@@ -278,7 +282,7 @@ if submitted:
         usage = st.session_state.usage
         is_admin = bool(usage.get("bypass"))
 
-        # Daily cap / cooldown unless admin override in effect
+        # Enforce caps unless admin override
         if not is_admin:
             # Daily limit
             if usage["count"] >= USAGE_DAILY_LIMIT:
@@ -286,7 +290,8 @@ if submitted:
                 mins_left = int((reset_at - dt.datetime.now()).total_seconds() // 60)
                 st.error(f"Daily limit reached. Resets in ~{mins_left} minutes.")
                 st.stop()
-            # Cooldown
+
+            # Cooldown between clicks
             since = now - float(usage["last_ts"])
             if since < USAGE_COOLDOWN_SECONDS:
                 wait = int(USAGE_COOLDOWN_SECONDS - since + 1)
@@ -294,8 +299,7 @@ if submitted:
                 st.stop()
 
         with st.spinner("Generating…"):
-            outs = generate_variants(2)  # variants slider exists, but enforce 2 here if you prefer
-            # If you want to respect the sidebar setting, replace 2 with int(variants)
+            outs = generate_variants(int(variants))
 
         if not outs:
             st.warning("No text returned. Try adjusting inputs and generate again.")
@@ -345,4 +349,4 @@ with st.expander("🕘 History (this session)"):
             st.markdown("---")
 
 st.markdown("<hr/>", unsafe_allow_html=True)
-st.caption("Unlocked via Gumroad access key or admin override.")
+st.caption("Unlocked via Gumroad access key or admin override. Pro plan uses a single master API key. Contact: support@yourdomain.com")
