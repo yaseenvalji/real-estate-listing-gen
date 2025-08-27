@@ -1,4 +1,10 @@
-# app.py — Real Estate Listing Generator (PRO only, with readable output cards)
+# app.py — Real Estate Listing Generator (PRO only, polished & complete)
+# - Gumroad license gate (users unlock with purchase key)
+# - Admin override code (lets you in without purchase)
+# - Uses your master OPENAI_API_KEY (no BYOK)
+# - Daily usage cap + cooldown + midnight reset
+# - Clean UI, strong contrast for results, no creativity slider
+# - De-duplicated model list, example address = "e.g., London N1"
 
 import os
 import time
@@ -26,7 +32,7 @@ DEFAULT_MODEL  = get_secret("OPENAI_DEFAULT_MODEL", "gpt-4o-mini")
 # License gate (Gumroad permalink slug, e.g., "real-estate-listing-gen-pro")
 GUMROAD_PRODUCT_PERMALINK = get_secret("GUMROAD_PRODUCT_PERMALINK", "")
 
-# Admin override (enter this in the gate to unlock without purchase)
+# Admin override (enter this at the gate to unlock without purchase)
 ADMIN_OVERRIDE_CODE = get_secret("ADMIN_BYPASS", "")  # leave blank to disable
 
 # Usage controls
@@ -181,7 +187,7 @@ with st.sidebar:
 # ================== Form ==================
 with st.form("listing_form"):
     st.subheader("Property Details")
-    address = st.text_input("Address / Area", placeholder="e.g., 20 Maunder Close, RM16 6BB")
+    address = st.text_input("Address / Area", placeholder="e.g., London N1")
 
     col1, col2, col3 = st.columns([1,1,1])
     with col1:
@@ -348,7 +354,6 @@ if submitted:
                 st.markdown(f"<div class='result-card'>{textwrap.dedent(text)}</div>", unsafe_allow_html=True)
 
                 with st.expander("Show raw text (copy)"):
-                    # read-only textarea for easy copy
                     st.text_area(label=f"Variant {i} (raw)", value=text, height=220, key=f"raw_{i}")
 
             st.download_button(
@@ -374,3 +379,4 @@ with st.expander("🕘 History (this session)"):
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 st.caption("Unlocked via Gumroad access key or admin override. Contact: yaseen.valji@gmail.com")
+
